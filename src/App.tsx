@@ -1,7 +1,8 @@
-import React, { useEffect, useState, DragEvent } from 'react';
+import React, { useEffect, useState, DragEvent, ChangeEvent } from 'react';
 import type { Game, GameSummary, GameCategories } from './types';
 import { VennDiagram } from './components/VennDiagram';
 import { Upload, ChevronDown, ChevronRight, Search } from 'lucide-react';
+import JSZip from 'jszip';
 
 // Extract environment from filename
 const getEnvironmentFromFileName = (fileName: string): string => {
@@ -100,6 +101,55 @@ function App() {
   const [expandedCategories, setExpandedCategories] = useState<{[key: string]: boolean}>({});
   const [filterString, setFilterString] = useState<string>('');
 
+  const processFile = async (file: File) => {
+    try {
+      console.log('Processing file:', file.name);
+      const text = await file.text();
+      let data;
+
+      try {
+        data = JSON.parse(text);
+      } catch (parseError) {
+        console.error('Error parsing JSON from file:', file.name, parseError);
+        return;
+      }
+
+      // Update environment from the first file
+      const fileEnv = getEnvironmentFromFileName(file.name);
+      if (fileEnv !== 'Unknown') {
+        setEnvironment(fileEnv);
+      }
+
+      let parsedData: Game[] = [];
+
+      if (file.name.toLowerCase().includes('cms')) {
+        parsedData = parseCMSData(data);
+        if (parsedData.length > 0) {
+          setGameData(prev => ({ ...prev, cms: parsedData }));
+          setUploadedFiles(prev => ({ ...prev, cms: true }));
+        }
+      } else if (file.name.toLowerCase().includes('iwg')) {
+        parsedData = parseContentHubData(data);
+        if (parsedData.length > 0) {
+          setGameData(prev => ({ ...prev, contentHub: parsedData }));
+          setUploadedFiles(prev => ({ ...prev, contentHub: true }));
+        }
+      } else if (file.name.toLowerCase().includes('upam')) {
+        parsedData = parseUPAMData(data);
+        if (parsedData.length > 0) {
+          setGameData(prev => ({ ...prev, upam: parsedData }));
+          setUploadedFiles(prev => ({ ...prev, upam: true }));
+        }
+      } else {
+        console.warn('Unrecognized file type:', file.name);
+      }
+
+      console.log(`Processed ${parsedData.length} games from ${file.name}`);
+    } catch (error) {
+      console.error('Error reading file:', file.name, error);
+    }
+  };
+
   const handleDragOver = (e: DragEvent<HTMLDivElement>) => {
     e.preventDefault();
     e.stopPropagation();
@@ -109,63 +159,49 @@ function App() {
     e.preventDefault();
     e.stopPropagation();
 
-    const files = Array.from(e.dataTransfer.files);
-    
-    for (const file of files) {
-      try {
-        console.log('Processing file:', file.name);
-        const text = await file.text();
-        let data;
-        
-        try {
-          data = JSON.parse(text);
-        } catch (parseError) {
-          console.error('Error parsing JSON from file:', file.name, parseError);
-          continue;
-        }
-
-        // Update environment from the first file
-        const fileEnv = getEnvironmentFromFileName(file.name);
-        if (fileEnv !== 'Unknown') {
-          setEnvironment(fileEnv);
-        }
-
-        let parsedData: Game[] = [];
-        
-        if (file.name.toLowerCase().includes('cms')) {
-          parsedData = parseCMSData(data);
-          if (parsedData.length > 0) {
-            setGameData(prev => ({ ...prev, cms: parsedData }));
-            setUploadedFiles(prev => ({ ...prev, cms: true }));
+    const items = Array.from(e.dataTransfer.items);
+    for (const item of items) {
+      if (item.kind === 'file') {
+        const file = item.getAsFile();
+        if (file) {
+          if (file.name.endsWith('.zip')) {
+            const zip = new JSZip();
+            const contents = await zip.loadAsync(file);
+            for (const filename in contents.files) {
+              const unzippedFile = await contents.files[filename].async('blob');
+              await processFile(new File([unzippedFile], filename));
+            }
+          } else {
+            await processFile(file);
           }
-        } else if (file.name.toLowerCase().includes('iwg')) {
-          parsedData = parseContentHubData(data);
-          if (parsedData.length > 0) {
-            setGameData(prev => ({ ...prev, contentHub: parsedData }));
-            setUploadedFiles(prev => ({ ...prev, contentHub: true }));
-          }
-        } else if (file.name.toLowerCase().includes('upam')) {
-          parsedData = parseUPAMData(data);
-          if (parsedData.length > 0) {
-            setGameData(prev => ({ ...prev, upam: parsedData }));
-            setUploadedFiles(prev => ({ ...prev, upam: true }));
+        }
+      }
+    }
+  };
+
+  const handleFileInput = async (e: ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files) {
+      const files = Array.from(e.target.files);
+      for (const file of files) {
+        if (file.name.endsWith('.zip')) {
+          const zip = new JSZip();
+          const contents = await zip.loadAsync(file);
+          for (const filename in contents.files) {
+            const unzippedFile = await contents.files[filename].async('blob');
+            await processFile(new File([unzippedFile], filename));
           }
         } else {
-          console.warn('Unrecognized file type:', file.name);
+          await processFile(file);
         }
-
-        console.log(`Processed ${parsedData.length} games from ${file.name}`);
-      } catch (error) {
-        console.error('Error reading file:', file.name, error);
       }
     }
   };
 
   const filterGames = (games: Array<{id: string, name: string}>) => {
     if (!filterString.trim()) return games;
-    
+
     const filters = filterString.split(',').map(f => f.trim().toLowerCase());
-    return games.filter(game => 
+    return games.filter(game =>
       filters.some(filter => game.id.toLowerCase().includes(filter))
     );
   };
@@ -190,31 +226,31 @@ function App() {
         const upamSet = new Set(activeInUPAM.map(g => g.id));
 
         // Calculate game categories
-        const allThreeGames = activeInCMS.filter(g => 
+        const allThreeGames = activeInCMS.filter(g =>
           contentHubSet.has(g.id) && upamSet.has(g.id)
         );
 
-        const cmsOnlyGames = activeInCMS.filter(g => 
+        const cmsOnlyGames = activeInCMS.filter(g =>
           !contentHubSet.has(g.id) && !upamSet.has(g.id)
         );
 
-        const contentHubOnlyGames = activeInContentHub.filter(g => 
+        const contentHubOnlyGames = activeInContentHub.filter(g =>
           !cmsSet.has(g.id) && !upamSet.has(g.id)
         );
 
-        const upamOnlyGames = activeInUPAM.filter(g => 
+        const upamOnlyGames = activeInUPAM.filter(g =>
           !cmsSet.has(g.id) && !contentHubSet.has(g.id)
         );
 
-        const cmsAndContentHubGames = activeInCMS.filter(g => 
+        const cmsAndContentHubGames = activeInCMS.filter(g =>
           contentHubSet.has(g.id) && !upamSet.has(g.id)
         );
 
-        const cmsAndUpamGames = activeInCMS.filter(g => 
+        const cmsAndUpamGames = activeInCMS.filter(g =>
           !contentHubSet.has(g.id) && upamSet.has(g.id)
         );
 
-        const contentHubAndUpamGames = activeInContentHub.filter(g => 
+        const contentHubAndUpamGames = activeInContentHub.filter(g =>
           !cmsSet.has(g.id) && upamSet.has(g.id)
         );
 
@@ -282,8 +318,8 @@ function App() {
     <div className="min-h-screen bg-gray-100 p-8">
       <div className="max-w-7xl mx-auto">
         <h1 className="text-3xl font-bold mb-8">{environment} IWG Analysis</h1>
-        
-        <div 
+
+        <div
           className="bg-white rounded-lg shadow-md p-6 mb-8 border-2 border-dashed border-gray-300"
           onDragOver={handleDragOver}
           onDrop={handleDrop}
@@ -292,8 +328,23 @@ function App() {
             <div className="text-center">
               <Upload className="mx-auto h-12 w-12 text-gray-400" />
               <p className="mt-2 text-sm text-gray-600">
-                Drag and drop your JSON files here
+                Drag and drop your JSON files or a single zip file here
               </p>
+              <p className="mt-1 text-xs text-gray-500">or</p>
+              <input
+                type="file"
+                multiple
+                accept=".json,.zip"
+                onChange={handleFileInput}
+                className="hidden"
+                id="file-upload"
+              />
+              <label
+                htmlFor="file-upload"
+                className="cursor-pointer mt-2 inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+              >
+                Browse files
+              </label>
               <div className="mt-4 flex gap-2 justify-center text-sm">
                 <span className={`px-2 py-1 rounded ${uploadedFiles.cms ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-800'}`}>
                   CMS {uploadedFiles.cms ? '✓' : ''}
@@ -343,7 +394,7 @@ function App() {
                     { label: 'Content Hub & UPAM', key: 'contentHubAndUpam', games: gameCategories.contentHubAndUpam }
                   ].map(({ label, key, games }) => (
                     <React.Fragment key={key}>
-                      <tr 
+                      <tr
                         className="hover:bg-gray-50 cursor-pointer"
                         onClick={() => toggleCategory(key)}
                       >
